@@ -1,0 +1,76 @@
+name: OpenTofu Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply the saved plan after review
+        type: boolean
+        default: false
+
+concurrency:
+  group: opentofu-azure-example
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  ARM_USE_OIDC: "true"
+  ARM_USE_AZUREAD: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  STATE_STORAGE_ACCOUNT: ${{ vars.STATE_STORAGE_ACCOUNT }}
+  STATE_CONTAINER: ${{ vars.STATE_CONTAINER }}
+
+jobs:
+  plan:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version_file: .opentofu-version
+          tofu_wrapper: false
+      - name: Initialize
+        run: |
+          tofu init -input=false -lockfile=readonly \
+            -backend-config="storage_account_name=${STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${STATE_CONTAINER}" \
+            -backend-config="key=example.tfstate"
+      - run: tofu fmt -check
+      - run: tofu validate
+      - run: tofu plan -input=false -no-color -out=example.tfplan
+      - uses: actions/upload-artifact@v4
+        if: inputs.apply
+        with:
+          name: azure-plan-${{ github.run_attempt }}
+          path: example.tfplan
+          if-no-files-found: error
+          retention-days: 1
+
+  apply:
+    if: inputs.apply
+    needs: plan
+    environment: azure-apply
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version_file: .opentofu-version
+          tofu_wrapper: false
+      - name: Initialize
+        run: |
+          tofu init -input=false -lockfile=readonly \
+            -backend-config="storage_account_name=${STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${STATE_CONTAINER}" \
+            -backend-config="key=example.tfstate"
+      - uses: actions/download-artifact@v4
+        with:
+          name: azure-plan-${{ github.run_attempt }}
+      - run: tofu apply -input=false -no-color example.tfplan
